@@ -1,0 +1,45 @@
+# Déploiement Render.com — XTER Transit (plan gratuit)
+# Docs : https://render.com/docs/blueprint-spec
+#
+# Créer un Web Service depuis un dépôt GitHub contenant ce fichier :
+# Render détecte ce blueprint et pré-remplit tout.
+services:
+  - type: web
+    name: xter-transit
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: DATABASE_URL
+        value: "file:./prisma/dev.db"
+      - key: APP_URL
+        value: https://xter-transit.onrender.com
+      - key: ADMIN_EMAIL
+        value: admin@xter-transit.local
+      - key: ADMIN_PASSWORD
+        sync: false # à saisir dans le tableau de bord Render
+      - key: ADMIN_NAME
+        value: Administrateur
+      - key: CRON_SECRET
+        generateValue: true
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: AMADEUS_CLIENT_ID
+        sync: false
+      - key: AMADEUS_CLIENT_SECRET
+        sync: false
+      - key: AMADEUS_ENV
+        value: test

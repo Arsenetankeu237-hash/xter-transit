@@ -1,0 +1,608 @@
+// XTER Transit — Schéma de données
+// SQLite en développement ; conçu pour basculer vers PostgreSQL en production
+// (pas d'enum Prisma ni de Decimal : statuts en String validés par Zod, montants en Float + devise).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ---------------------------------------------------------------------------
+// Sécurité, utilisateurs, sessions
+// ---------------------------------------------------------------------------
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  name               String
+  passwordHash       String
+  role               String // SUPER_ADMIN | ADMIN | AGENT_TRANSIT | WAREHOUSE_MANAGER | ACCOUNTANT | SHIPMENT_MANAGER | DELIVERY_AGENT | CLIENT
+  active             Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
+  customerId         String?   @unique // lien espace client (rôle CLIENT)
+  customer           Customer? @relation(fields: [customerId], references: [id])
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  sessions            Session[]
+  manualEvents        TrackingEvent[] @relation("ManualEvents")
+  deliveries          Delivery[]      @relation("DeliveryAgent")
+  confirmedDeliveries Delivery[]      @relation("DeliveryConfirmer")
+  auditLogs           AuditLog[]
+  confirmedPayments   Payment[]       @relation("ConfirmedPayments")
+  createdQuotes       Quote[]         @relation("QuoteAuthor")
+  uploads             Document[]
+
+  @@index([role])
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// CRM
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id          String    @id @default(cuid())
+  code        String    @unique // CLI-000001
+  type        String    @default("INDIVIDUAL") // INDIVIDUAL | COMPANY
+  name        String
+  email       String?
+  phone       String?
+  phone2      String?
+  country     String?
+  city        String?
+  addressLine String?
+  taxId       String?
+  notes       String? // notes internes
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  users         User[]
+  addresses     Address[]
+  packages      Package[]
+  quotes        Quote[]
+  invoices      Invoice[]
+  documents     Document[]
+  notifications Notification[]
+
+  @@index([name])
+  @@index([phone])
+}
+
+model Address {
+  id          String    @id @default(cuid())
+  customerId  String?
+  customer    Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  label       String // "Expéditeur principal", "Destinataire Paris"…
+  contactName String
+  phone       String?
+  email       String?
+  country     String
+  countryCode String?
+  city        String
+  line1       String
+  line2       String?
+  isDefault   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  sentPackages     Package[] @relation("Sender")
+  receivedPackages Package[] @relation("Recipient")
+
+  @@index([customerId])
+}
+
+// ---------------------------------------------------------------------------
+// Colis
+// ---------------------------------------------------------------------------
+
+model Package {
+  id                 String    @id @default(cuid())
+  trackingNumber     String    @unique // XTER-2026-000001
+  customerId         String
+  customer           Customer  @relation(fields: [customerId], references: [id])
+  shipmentId         String? // expédition (aérienne/maritime) de rattachement
+  shipment           Shipment? @relation(fields: [shipmentId], references: [id], onDelete: SetNull)
+  mode               String    @default("AIR") // AIR | SEA
+  status             String    @default("REQUEST_RECEIVED")
+  statusUpdatedAt    DateTime  @default(now())
+  reference          String? // référence commande/client
+  contentDescription String?
+  natureOfGoods      String?
+  pieces             Int?
+  weightKg           Float?
+  lengthCm           Float?
+  widthCm            Float?
+  heightCm           Float?
+  volumetricWeightKg Float?
+  taxableWeightKg    Float?
+  declaredValue      Float?
+  declaredCurrency   String?
+  senderAddressId    String?
+  senderAddress      Address?  @relation("Sender", fields: [senderAddressId], references: [id], onDelete: SetNull)
+  recipientAddressId String?
+  recipientAddress   Address?  @relation("Recipient", fields: [recipientAddressId], references: [id], onDelete: SetNull)
+  handlingInstructions String?
+  holdFlag           Boolean   @default(false) // litige / régularisation
+  archivedAt         DateTime?
+  createdBy          String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  events     TrackingEvent[]
+  documents  Document[]
+  deliveries Delivery[]
+
+  @@index([customerId])
+  @@index([shipmentId])
+  @@index([status])
+  @@index([mode])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Expéditions (aériennes / maritimes) et groupage
+// ---------------------------------------------------------------------------
+
+model Shipment {
+  id                 String            @id @default(cuid())
+  reference          String            @unique // EXP-A-2026-000001 / EXP-M-2026-000001
+  type               String // AIR | SEA
+  status             String            @default("PLANNED")
+  groupage           Boolean           @default(false)
+  // Trajet
+  originCountry      String?
+  originCity         String?
+  originCode         String? // code aéroport IATA ou port UN/LOCODE
+  destCountry        String?
+  destCity           String?
+  destCode           String?
+  // Transporteur
+  providerId         String?
+  provider           TransportProvider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  flightNumber       String?
+  vesselName         String?
+  voyageNumber       String?
+  containerNumber    String?
+  containerType      String? // 20', 40', 40'HC, groupage…
+  // Documents de transport
+  awbNumber          String? // lettre de transport aérien (master)
+  blNumber           String? // connaissement maritime
+  // Dates clés
+  bookingDate        DateTime?
+  plannedDepartureAt DateTime?
+  actualDepartureAt  DateTime?
+  etaAt              DateTime?
+  actualArrivalAt    DateTime?
+  loadedAt           DateTime? // empotage / chargement
+  unloadedAt         DateTime?
+  releasedAt         DateTime? // mise à disposition
+  // Marchandises
+  piecesCount        Int?
+  palletsCount       Int?
+  totalWeightKg      Float?
+  totalVolumeM3      Float?
+  // Coûts (devise ci-dessous)
+  currency           String            @default("XAF")
+  freightCost        Float?
+  handlingCost       Float?
+  portFees           Float?
+  customsFees        Float?
+  storageCost        Float?
+  otherFees          Float?
+  notes              String?
+  createdBy          String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  packages  Package[]
+  events    TrackingEvent[]
+  documents Document[]
+
+  @@index([type])
+  @@index([status])
+  @@index([containerNumber])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Tracking
+// ---------------------------------------------------------------------------
+
+model TrackingEvent {
+  id               String    @id @default(cuid())
+  packageId        String?
+  package          Package?  @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  shipmentId       String?
+  shipment         Shipment? @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  status           String
+  occurredAt       DateTime
+  location         String?
+  description      String
+  source           String    @default("MANUAL") // MANUAL | API | IMPORT
+  agentId          String? // si source = MANUAL
+  agent            User?     @relation("ManualEvents", fields: [agentId], references: [id], onDelete: SetNull)
+  providerId       String?
+  integrationId    String?
+  externalRef      String? // identifiant d'événement chez le transporteur
+  fingerprint      String? // empreinte anti-doublon (hash source+réf+statut+date)
+  receivedAt       DateTime  @default(now())
+  visiblePublic    Boolean   @default(true)
+  supersededById   String? // correction : pointe vers l'événement de remplacement
+  corrected        Boolean   @default(false) // cet événement a été corrigé (conservé pour audit)
+  correctionReason String?
+  createdAt        DateTime  @default(now())
+
+  @@unique([fingerprint])
+  @@index([packageId, occurredAt])
+  @@index([shipmentId, occurredAt])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Partenaires & intégrations transporteurs
+// ---------------------------------------------------------------------------
+
+model TransportProvider {
+  id          String    @id @default(cuid())
+  name        String
+  type        String // AIR_CARRIER | SEA_CARRIER | COURIER | FORWARDER | CUSTOMS_AGENT | DELIVERY
+  country     String?
+  city        String?
+  contactName String?
+  phone       String?
+  email       String?
+  website     String?
+  services    String? // description des services proposés
+  awbPrefix   String? // préfixe IATA fret (3 chiffres) pour l'assistant AWB — ex : 057 (Air France)
+  notes       String?
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  integrations ProviderIntegration[]
+  shipments   Shipment[]
+
+  @@index([type])
+}
+
+model ProviderIntegration {
+  id              String            @id @default(cuid())
+  providerId      String
+  provider        TransportProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  adapterKey      String // generic-rest | generic-webhook | csv-import | …
+  name            String
+  enabled         Boolean           @default(false)
+  config          String            @default("{}") // JSON : baseUrl, apiKeyEnvVar, mapping statuts, secretEnvVar, pollMinutes…
+  lastSyncAt      DateTime?
+  lastSyncStatus  String? // SUCCESS | PARTIAL | ERROR
+  lastSyncMessage String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  syncLogs TrackingSyncLog[]
+  webhooks WebhookEvent[]
+
+  @@index([providerId])
+}
+
+model TrackingSyncLog {
+  id            String             @id @default(cuid())
+  integrationId String
+  integration   ProviderIntegration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  trigger       String             @default("MANUAL") // MANUAL | CRON | WEBHOOK
+  status        String             @default("RUNNING") // RUNNING | SUCCESS | PARTIAL | ERROR
+  imported      Int                @default(0)
+  duplicates    Int                @default(0)
+  failed        Int                @default(0)
+  details       String? // JSON : erreurs, refs traitées
+  startedAt     DateTime           @default(now())
+  finishedAt    DateTime?
+
+  @@index([integrationId, startedAt])
+}
+
+model WebhookEvent {
+  id            String             @id @default(cuid())
+  integrationId String
+  integration   ProviderIntegration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  externalId    String? // idempotence fournie par le transporteur
+  payload       String
+  status        String             @default("PROCESSED") // PROCESSED | DUPLICATE | REJECTED | ERROR
+  error         String?
+  receivedAt    DateTime           @default(now())
+
+  @@unique([integrationId, externalId])
+}
+
+// ---------------------------------------------------------------------------
+// Référentiel destinations & tarifs
+// ---------------------------------------------------------------------------
+
+model Destination {
+  id          String   @id @default(cuid())
+  type        String // COUNTRY | CITY | AIRPORT | PORT | WAREHOUSE | AGENCY
+  code        String? // IATA / UN-LOCODE / code interne
+  name        String
+  country     String?
+  countryCode String?
+  notes       String?
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  @@unique([type, name, country])
+  @@index([type])
+  @@index([country])
+}
+
+model RateTable {
+  id            String     @id @default(cuid())
+  name          String
+  mode          String // AIR | SEA
+  originCountry String?
+  destCountry   String?
+  providerId    String?
+  currency      String     @default("XAF")
+  validFrom     DateTime?
+  validTo       DateTime?
+  active        Boolean    @default(true)
+  notes         String?
+  createdAt     DateTime   @default(now())
+
+  lines RateLine[]
+
+  @@index([mode, active])
+}
+
+model RateLine {
+  id          String    @id @default(cuid())
+  rateTableId String
+  rateTable   RateTable @relation(fields: [rateTableId], references: [id], onDelete: Cascade)
+  basis       String // PER_KG | PER_M3 | PER_SHIPMENT | MIN_CHARGE | FEE_DOSSIER | FEE_HANDLING | FEE_PORT | FEE_CUSTOMS | FEE_STORAGE | FEE_OTHER
+  label       String
+  unitPrice   Float?
+  fixedAmount Float?
+  minAmount   Float?
+  notes       String?
+
+  @@index([rateTableId])
+}
+
+// ---------------------------------------------------------------------------
+// Commercial : devis, factures, paiements
+// ---------------------------------------------------------------------------
+
+model Quote {
+  id            String    @id @default(cuid())
+  number        String    @unique // DEV-2026-000001
+  customerId    String?
+  customer      Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  mode          String    @default("AIR")
+  status        String    @default("NEW") // NEW | PROCESSING | SENT | ACCEPTED | REFUSED | EXPIRED | INVOICED
+  // Demande (formulaire public ou saisie agent)
+  contactName   String?
+  contactEmail  String?
+  contactPhone  String?
+  originCountry String?
+  originCity    String?
+  destCountry   String?
+  destCity      String?
+  weightKg      Float?
+  lengthCm      Float?
+  widthCm       Float?
+  heightCm      Float?
+  volumeM3      Float?
+  cargoType     String? // description marchandise
+  isUrgent      Boolean   @default(false)
+  notes         String? // demande du client
+  // Chiffrage (agent)
+  lines         String? // JSON [{label, basis, qty, unitPrice, amount}]
+  currency      String?
+  subtotal      Float?
+  total         Float?
+  estimateOnly  Boolean   @default(true) // estimation ≠ prix confirmé
+  validUntil    DateTime?
+  internalNotes String?
+  source        String    @default("PUBLIC") // PUBLIC | AGENT
+  createdById   String?
+  createdBy     User?     @relation("QuoteAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  documents Document[]
+  invoices  Invoice[]
+
+  @@index([status])
+  @@index([customerId])
+}
+
+model Invoice {
+  id        String    @id @default(cuid())
+  number    String    @unique // FAC-2026-000001
+  customerId String
+  customer  Customer  @relation(fields: [customerId], references: [id])
+  quoteId   String?
+  quote     Quote?    @relation(fields: [quoteId], references: [id], onDelete: SetNull)
+  status    String    @default("DRAFT") // DRAFT | ISSUED | PARTIAL | PAID | CANCELLED
+  currency  String    @default("XAF")
+  lines     String    @default("[]") // JSON [{label, qty, unitPrice, amount}]
+  subtotal  Float     @default(0)
+  taxRate   Float?
+  taxAmount Float?
+  total     Float     @default(0)
+  issuedAt  DateTime?
+  dueAt     DateTime?
+  notes     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  payments  Payment[]
+  documents Document[]
+
+  @@index([customerId])
+  @@index([status])
+}
+
+model Payment {
+  id            String    @id @default(cuid())
+  invoiceId     String
+  invoice       Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  method        String // CASH | BANK_TRANSFER | MOBILE_MONEY | ONLINE
+  amount        Float
+  currency      String
+  status        String    @default("PENDING") // PENDING | CONFIRMED | FAILED | CANCELLED
+  reference     String? // référence virement / transaction Mobile Money
+  providerRef   String? // référence prestataire paiement en ligne
+  receivedAt    DateTime? // encaissement effectif
+  confirmedById String?
+  confirmedBy   User?     @relation("ConfirmedPayments", fields: [confirmedById], references: [id], onDelete: SetNull)
+  confirmedAt   DateTime?
+  notes         String?
+  createdAt     DateTime  @default(now())
+
+  @@index([invoiceId])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Documents & fichiers (stockage privé)
+// ---------------------------------------------------------------------------
+
+model Document {
+  id          String    @id @default(cuid())
+  kind        String // RECEPTION_FORM | LABEL | MANIFEST | GROUPAGE_LIST | QUOTE | INVOICE | RECEIPT | DELIVERY_NOTE | POD_PHOTO | SIGNATURE | AWB | BL | CUSTOMS | OTHER
+  title       String
+  fileName    String // nom d'affichage
+  storedName  String // nom du fichier sur disque (aléatoire)
+  mime        String
+  sizeBytes   Int
+  packageId   String?
+  package     Package?  @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  shipmentId  String?
+  shipment    Shipment? @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  invoiceId   String?
+  invoice     Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  quoteId     String?
+  quote       Quote?    @relation(fields: [quoteId], references: [id], onDelete: SetNull)
+  customerId  String?
+  customer    Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  visibility  String    @default("STAFF") // STAFF | CLIENT (téléchargeable dans l'espace client)
+  uploadedById String?
+  uploadedBy  User?     @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+
+  @@index([packageId])
+  @@index([customerId])
+  @@index([kind])
+}
+
+// ---------------------------------------------------------------------------
+// Livraison finale
+// ---------------------------------------------------------------------------
+
+model Delivery {
+  id             String   @id @default(cuid())
+  packageId      String
+  package        Package  @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  agentId        String?
+  agent          User?    @relation("DeliveryAgent", fields: [agentId], references: [id], onDelete: SetNull)
+  scheduledFor   DateTime?
+  status         String   @default("ASSIGNED") // ASSIGNED | IN_PROGRESS | DELIVERED | FAILED | RESCHEDULED | CANCELLED
+  attempts       Int      @default(0)
+  lastAttemptAt  DateTime?
+  deliveredAt    DateTime?
+  recipientName  String?
+  note           String?
+  photoDocId     String?
+  signatureDocId String?
+  confirmedById  String?
+  confirmedBy    User?    @relation("DeliveryConfirmer", fields: [confirmedById], references: [id], onDelete: SetNull)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([agentId, status])
+  @@index([packageId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id               String    @id @default(cuid())
+  channel          String // IN_APP | EMAIL | WHATSAPP | SMS
+  eventKey         String // ex. package_shipped, payment_received
+  userId           String? // IN_APP : destinataire utilisateur
+  customerId       String?
+  customer         Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  to               String? // adresse email / téléphone pour les canaux externes
+  subject          String
+  body             String
+  status           String    @default("PENDING") // PENDING | SENT | FAILED | SKIPPED
+  error            String?
+  attempts         Int       @default(0)
+  relatedPackageId String?
+  sentAt           DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([status])
+  @@index([userId])
+  @@index([eventKey])
+}
+
+model NotificationTemplate {
+  id       String  @id @default(cuid())
+  eventKey String
+  channel  String // IN_APP | EMAIL | WHATSAPP | SMS
+  subject  String
+  body     String // {{trackingNumber}}, {{status}}… placeholders
+  enabled  Boolean @default(true)
+
+  @@unique([eventKey, channel])
+}
+
+// ---------------------------------------------------------------------------
+// Audit & paramètres
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userName  String? // copie lisible même si l'utilisateur est supprimé
+  action    String // CREATE | UPDATE | DELETE | LOGIN | LOGIN_FAILED | EXPORT | STATUS_CHANGE…
+  entity    String
+  entityId  String?
+  before    String? // JSON
+  after     String? // JSON
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@index([userId])
+}
+
+model Setting {
+  key   String @id
+  value String
+}

@@ -1,9 +1,16 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
+  // Paquets à binaires natifs / Node-only : jamais bundlés
+  serverExternalPackages: [
+    "@prisma/client",
+    "@prisma/adapter-better-sqlite3",
+    "better-sqlite3",
+    "nodemailer",
+    "qrcode",
+  ],
   turbopack: {
     rules: {
       "*.css": {
