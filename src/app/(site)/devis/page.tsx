@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { connection } from "next/server";
 import { QuoteForm } from "@/components/quote-form";
 import { Card } from "@/components/ui";
 import { getSettings } from "@/lib/settings";
@@ -30,6 +31,7 @@ export default function DevisPage() {
 }
 
 async function Aside() {
+  await connection(); // rendu à la demande : données gérées en administration
   const settings = await getSettings();
   return (
     <div className="space-y-4">

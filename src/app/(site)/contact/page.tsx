@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { connection } from "next/server";
 import { ContactForm } from "@/components/contact-form";
 import { Card } from "@/components/ui";
 import { getSettings } from "@/lib/settings";
@@ -23,6 +24,7 @@ export default function ContactPage() {
 }
 
 async function ContactAside() {
+  await connection(); // rendu à la demande : données gérées en administration
   const settings = await getSettings();
   const wa = settings.whatsappNumber.replace(/[^\d]/g, "");
   return (
